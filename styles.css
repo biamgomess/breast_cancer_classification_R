@@ -1,0 +1,18 @@
+/* Typography */
+body {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+/* Slightly tighter headings for a clean academic look */
+h1, h2, h3, h4 {
+  font-family: "Times New Roman", Times, serif;
+  letter-spacing: 0.2px;
+}
+
+/* Code blocks remain monospace for readability */
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.95em;
+}

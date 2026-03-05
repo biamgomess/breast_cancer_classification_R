@@ -1,0 +1,321 @@
+---
+title: "Breast Cancer Wisconsin (Diagnostic) — Data Analysis & Decision Tree"
+author: "Beatriz Martins Gomes Silva"
+format:
+  html:
+    css: styles.css
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    df-print: paged
+execute:
+  warning: false
+  message: false
+---
+
+## 1. Context & objective
+
+This report presents an end-to-end workflow on the **Breast Cancer Wisconsin (Diagnostic)** dataset:
+
+- Understand the dataset structure and quality
+- Explore distributions and relationships
+- Build a first **baseline** classification model (Decision Tree)
+- Evaluate performance on a train/test split
+
+> Target variable: `diagnosis` (`M` = malignant, `B` = benign)
+
+## 2. Setup
+
+```{r}
+# Core
+library(tidyverse)
+library(janitor)
+
+# Modeling
+library(caret)
+library(rsample)
+library(rpart)
+library(rpart.plot)
+library(yardstick)
+library(pROC)
+```
+
+```{r}
+# --- Style (plots) ---
+bronze <- "#CD7F32"
+bronze_dark <- "#8C5A2B"
+bronze_light <- "#F5E6D3"
+
+theme_set(theme_classic(base_size = 14, base_family = "Times New Roman") +
+            theme(
+              plot.title = element_text(face = "bold"),
+              plot.subtitle = element_text(size = rel(0.9)),
+              plot.caption = element_text(size = rel(0.85), color = bronze_dark),
+              legend.position = "top"
+            ))
+```
+
+
+## 3. Load & clean data
+
+```{r}
+df_raw <- read_csv("data.csv", show_col_types = FALSE) |> clean_names()
+
+glimpse(df_raw)
+```
+
+### 3.1 Basic cleaning
+
+- Remove the empty column (`unnamed_32`)
+- Ensure `diagnosis` is a factor with explicit labels
+
+```{r}
+df <- df_raw |>
+  select(-any_of("unnamed_32")) |>
+  mutate(
+    diagnosis = factor(diagnosis, levels = c("B","M"), labels = c("Benign","Malignant"))
+  )
+
+skimr::skim(df)
+```
+
+> If `skimr` is not installed, you can remove the line above.
+
+## 4. Exploratory Data Analysis (EDA)
+
+### 4.1 Class balance
+
+```{r}
+df |>
+  count(diagnosis) |>
+  mutate(pct = n / sum(n)) |>
+  ggplot(aes(x = diagnosis, y = n, fill = diagnosis)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  scale_fill_manual(values = c("Benign" = bronze_light, "Malignant" = bronze_dark)) +
+  labs(
+    title = "Class balance",
+    subtitle = "Benign vs malignant",
+    x = NULL,
+    y = "Number of samples",
+    caption = "Class counts"
+  )
+```
+
+### 4.2 Feature distributions (radius, perimeter, area)
+
+```{r}
+df_long <- df |>
+  select(diagnosis, radius_mean, perimeter_mean, area_mean) |>
+  pivot_longer(
+    cols = c(radius_mean, perimeter_mean, area_mean),
+    names_to = "feature",
+    values_to = "value"
+  )
+
+df_long |>
+  ggplot(aes(x = value, fill = diagnosis)) +
+  geom_histogram(bins = 30, alpha = 0.75, position = "identity") +
+  facet_wrap(~ feature, scales = "free", ncol = 1) +
+  scale_fill_manual(values = c("Benign" = bronze_light, "Malignant" = bronze)) +
+  labs(
+    title = "Feature distributions",
+    subtitle = "Radius, perimeter and area",
+    x = NULL,
+    y = "Count",
+    caption = "Distributions by class"
+  )
+```
+
+### 4.3 Correlation heatmap (readable subset)
+
+```{r, fig.width=12, fig.height=10}
+# The dataset contains many numeric features, which can make a full heatmap unreadable.
+# To keep it interpretable, we show a subset (including the 3 key features used later).
+
+vars_heatmap <- c(
+  "radius_mean", "perimeter_mean", "area_mean",
+  "texture_mean", "smoothness_mean", "compactness_mean",
+  "concavity_mean", "concave_points_mean", "symmetry_mean",
+  "fractal_dimension_mean", "radius_worst", "area_worst"
+)
+
+num_df <- df |> select(any_of(vars_heatmap))
+
+corr <- cor(num_df, use = "pairwise.complete.obs")
+
+corr_long <- as.data.frame(as.table(corr)) |>
+  rename(var1 = Var1, var2 = Var2, corr = Freq)
+
+corr_long |>
+  ggplot(aes(x = var1, y = var2, fill = corr)) +
+  geom_tile() +
+  coord_equal() +
+  scale_fill_gradient2(
+    low = bronze_light,
+    mid = "white",
+    high = bronze_dark,
+    midpoint = 0,
+    limits = c(-1, 1),
+    name = "r"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    axis.text.y = element_text(size = 10)
+  ) +
+  labs(
+    title = "Correlation heatmap",
+    subtitle = "Pearson correlation (subset)",
+    x = NULL,
+    y = NULL,
+    caption = "Scale: -1 to 1"
+  )
+```
+
+## 5. Modeling — Decision Tree (3 features)
+
+### 5.1 Train/test split
+
+```{r}
+set.seed(42)
+
+split <- initial_split(df, prop = 0.7, strata = diagnosis)
+train <- training(split)
+test  <- testing(split)
+
+table(train$diagnosis)
+table(test$diagnosis)
+```
+
+### 5.2 Train model (radius, perimeter, area)
+
+We train a decision tree using only **three features**:
+
+- `radius_mean`
+- `perimeter_mean`
+- `area_mean`
+
+```{r}
+set.seed(42)
+
+train_3 <- train |> select(diagnosis, radius_mean, perimeter_mean, area_mean)
+test_3  <- test  |> select(diagnosis, radius_mean, perimeter_mean, area_mean)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+dt3 <- caret::train(
+  diagnosis ~ .,
+  data = train_3,
+  method = "rpart2",
+  tuneLength = 20,
+  trControl = ctrl,
+  metric = "ROC"
+)
+
+rpart.plot(
+  dt3$finalModel,
+  cex = 0.85,
+  extra = 104,
+  type = 1,
+  box.palette = c(bronze_light, bronze_dark)
+)
+```
+
+## 6. Evaluation
+
+### 6.1 Predictions
+
+```{r}
+pred_class <- predict(dt3, newdata = test_3)
+pred_prob  <- predict(dt3, newdata = test_3, type = "prob")[, "Malignant"]
+
+results <- tibble(
+  truth = test_3$diagnosis,
+  pred  = pred_class,
+  prob_malignant = pred_prob
+)
+```
+
+### 6.2 Confusion matrix and metrics
+
+```{r}
+conf_mat(results, truth = truth, estimate = pred)
+
+metrics(results, truth = truth, estimate = pred) |>
+  filter(.metric %in% c("accuracy", "sens", "spec"))
+```
+
+### 6.3 ROC curve + AUC
+
+```{r}
+roc_obj <- pROC::roc(
+  response = results$truth,
+  predictor = results$prob_malignant,
+  levels = c("Benign", "Malignant"),
+  direction = "<"
+)
+
+plot(roc_obj, main = "ROC curve — Decision Tree (3 features)")
+pROC::auc(roc_obj)
+```
+
+## 7. Rule-based classifier (manual tree)
+
+To mirror the hand-made approach from the coursework, we implement a simple rule-based classifier:
+
+- If `radius_mean > 15` → **Malignant**
+- Else if `perimeter_mean > 100` → **Malignant**
+- Else if `area_mean > 750` → **Malignant**
+- Else → **Benign**
+
+```{r}
+rule_predict <- function(radius_mean, perimeter_mean, area_mean) {
+  if (radius_mean > 15) {
+    return("Malignant")
+  }
+  if (perimeter_mean > 100) {
+    return("Malignant")
+  }
+  if (area_mean > 750) {
+    return("Malignant")
+  }
+  return("Benign")
+}
+
+rule_pred <- pmap_chr(
+  test_3 |> select(radius_mean, perimeter_mean, area_mean),
+  rule_predict
+)
+
+rule_results <- tibble(
+  truth = test_3$diagnosis,
+  pred  = factor(rule_pred, levels = levels(test_3$diagnosis))
+)
+
+conf_mat(rule_results, truth = truth, estimate = pred)
+metrics(rule_results, truth = truth, estimate = pred) |>
+  filter(.metric %in% c("accuracy", "sens", "spec"))
+```
+
+### 7.1 Manual check on one sample
+
+```{r}
+one <- test_3[1, ]
+one
+
+rule_predict(one$radius_mean, one$perimeter_mean, one$area_mean)
+```
+
+## 8. Conclusions & next steps
+
+This report combines an explainable decision tree model (3 features) with a simple rule-based classifier.
+
+Potential next steps:
+- Compare several models (logistic regression, random forest) as additional baselines
+- Improve reporting of errors and misclassifications
+- Add feature engineering and calibration when appropriate
